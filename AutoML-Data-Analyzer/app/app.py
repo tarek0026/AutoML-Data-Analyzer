@@ -16,6 +16,8 @@ import pandas as pd
 import numpy as np
 import sys
 import logging
+import joblib
+import io
 from pathlib import Path
 from typing import Tuple
 
@@ -111,6 +113,39 @@ def render_bullet_messages(messages) -> None:
 
     for message in messages:
         st.write(f"- {message}")
+
+
+# ============================================================================
+# MODEL DOWNLOAD UTILITIES
+# ============================================================================
+
+def serialize_model_for_download(model: any, model_name: str, target_col: str) -> Tuple[bytes, str]:
+    """
+    Serialize a trained model to bytes for download.
+    
+    Args:
+        model: The trained model object
+        model_name: Name of the model (e.g., 'RandomForest')
+        target_col: The target column name for meaningful naming
+    
+    Returns:
+        Tuple of (serialized_bytes, filename)
+    """
+    try:
+        # Create a meaningful filename
+        filename = f"{target_col}_{model_name}_model.pkl"
+        # Ensure safe filename
+        filename = filename.replace(" ", "_").replace("/", "_").lower()
+        
+        # Serialize model using joblib to bytes
+        model_bytes = io.BytesIO()
+        joblib.dump(model, model_bytes)
+        model_bytes.seek(0)
+        
+        return model_bytes.getvalue(), filename
+    except Exception as e:
+        logger.error(f"Error serializing model: {str(e)}")
+        raise
 
 
 # ============================================================================
@@ -634,6 +669,32 @@ def render_modeling_tab():
     except Exception as e:
         st.warning(f"Could not render feature importance: {str(e)}")
         logger.warning(f"Feature importance error: {str(e)}")
+    
+    st.divider()
+    st.markdown("### 📥 Download Model")
+    
+    # Add download button for trained model
+    try:
+        best_model = modeling_info.get('best_model')
+        best_model_name = modeling_info.get('best_model_name', 'Model')
+        target_col = st.session_state.selected_target or "model"
+        
+        if best_model is not None:
+            model_bytes, filename = serialize_model_for_download(best_model, best_model_name, target_col)
+            
+            st.download_button(
+                label="⬇️ Download Trained Model (.pkl)",
+                data=model_bytes,
+                file_name=filename,
+                mime="application/octet-stream",
+                use_container_width=True
+            )
+            st.caption(f"📦 File: {filename} | Format: joblib pickle | Model: {best_model_name}")
+        else:
+            st.warning("⚠️ Model object not available for download")
+    except Exception as e:
+        st.error(f"❌ Error preparing model download: {str(e)}")
+        logger.error(f"Model download error: {str(e)}", exc_info=True)
 
 
 # ============================================================================

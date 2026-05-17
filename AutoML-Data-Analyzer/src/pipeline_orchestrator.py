@@ -223,6 +223,7 @@ class ProductionMLPipeline:
 
         return {
             "best_model_name": modeling_result.best_model_name,
+            "best_model": modeling_result.best_model,
             "best_score": modeling_result.best_score,
             "all_scores": modeling_result.all_scores,
             "feature_importance": modeling_result.feature_importance,
@@ -233,6 +234,7 @@ class ProductionMLPipeline:
             "training_data": modeling_result.training_data,
             "performance_band": modeling_result.performance_band,
             "processed_features": df_processed,
+            "target_encoder": modeling_result.target_encoder,
         }
 
     def _generate_insights(
