@@ -122,30 +122,72 @@ def render_bullet_messages(messages) -> None:
 def serialize_model_for_download(model: any, model_name: str, target_col: str) -> Tuple[bytes, str]:
     """
     Serialize a trained model to bytes for download.
+    Production-ready with robust error handling.
     
     Args:
-        model: The trained model object
+        model: The trained model object (sklearn model)
         model_name: Name of the model (e.g., 'RandomForest')
         target_col: The target column name for meaningful naming
     
     Returns:
         Tuple of (serialized_bytes, filename)
+    
+    Raises:
+        ValueError: If model is None or serialization fails
     """
+    if model is None:
+        raise ValueError("Model object is None - cannot serialize")
+    
     try:
         # Create a meaningful filename
         filename = f"{target_col}_{model_name}_model.pkl"
-        # Ensure safe filename
+        # Ensure safe filename - remove spaces, special chars, convert to lowercase
         filename = filename.replace(" ", "_").replace("/", "_").lower()
+        
+        # Validate filename length (max 255 on most filesystems)
+        if len(filename) > 200:
+            filename = filename[:200] + ".pkl"
+        
+        logger.debug(f"Serializing model to filename: {filename}")
         
         # Serialize model using joblib to bytes
         model_bytes = io.BytesIO()
-        joblib.dump(model, model_bytes)
+        joblib.dump(model, model_bytes, compress=3)  # compression level 3 for balance
         model_bytes.seek(0)
         
-        return model_bytes.getvalue(), filename
+        result_bytes = model_bytes.getvalue()
+        logger.info(f"✅ Model serialized successfully: {len(result_bytes)} bytes")
+        
+        return result_bytes, filename
+        
     except Exception as e:
-        logger.error(f"Error serializing model: {str(e)}")
-        raise
+        error_msg = f"Failed to serialize model: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        raise ValueError(error_msg)
+
+
+def verify_model_in_session() -> bool:
+    """
+    Debug helper: Verify that model is properly stored in session state.
+    Logs detailed information about model availability.
+    
+    Returns:
+        True if model is available, False otherwise
+    """
+    model_obj = st.session_state.get('trained_model_object')
+    model_name = st.session_state.get('trained_model_name')
+    model_target = st.session_state.get('trained_model_target')
+    
+    if model_obj is not None:
+        logger.info(f"✅ Model available in session: {model_name} (target: {model_target})")
+        logger.info(f"   Model type: {type(model_obj).__name__}")
+        logger.info(f"   Model object id: {id(model_obj)}")
+        return True
+    else:
+        logger.warning("⚠️ Model NOT found in session state")
+        logger.warning(f"   trained_model_name: {model_name}")
+        logger.warning(f"   trained_model_target: {model_target}")
+        return False
 
 
 # ============================================================================
@@ -170,6 +212,14 @@ def initialize_session_state():
         st.session_state.enable_modeling = False
     if 'analysis_type' not in st.session_state:
         st.session_state.analysis_type = "auto"
+    
+    # CRITICAL: Separate model storage for reliable persistence across reruns
+    if 'trained_model_object' not in st.session_state:
+        st.session_state.trained_model_object = None
+    if 'trained_model_name' not in st.session_state:
+        st.session_state.trained_model_name = None
+    if 'trained_model_target' not in st.session_state:
+        st.session_state.trained_model_target = None
 
 
 # ============================================================================
@@ -289,10 +339,28 @@ def run_modeling_only(data: pd.DataFrame, target_col: str):
             st.session_state.processed_data = results.get("clustering", {}).get("preprocessed_data")
             st.session_state.pca_data = results.get("clustering", {}).get("pca_data")
             st.session_state.modeling_skipped = False
+            
+            # CRITICAL: Extract and persist the model object separately for reliability
+            modeling_info = results.get("modeling", {})
+            if modeling_info and isinstance(modeling_info, dict):
+                trained_model = modeling_info.get("best_model")
+                model_name = modeling_info.get("best_model_name")
+                
+                if trained_model is not None:
+                    # Store in session state for reliable persistence across reruns
+                    st.session_state.trained_model_object = trained_model
+                    st.session_state.trained_model_name = model_name
+                    st.session_state.trained_model_target = target_col
+                    logger.info(f"✅ Model stored in session state: {model_name}")
+                else:
+                    logger.warning("⚠️ Best model not found in results")
+                    st.session_state.trained_model_object = None
+            
             st.success("✅ Modeling complete!")
     except Exception as e:
         st.error(f"❌ Error: {str(e)}")
         logger.error(f"Modeling error: {str(e)}", exc_info=True)
+        st.session_state.trained_model_object = None
 
 
 # ============================================================================
@@ -584,6 +652,9 @@ def render_modeling_tab():
             st.info("Select a target column and click 'Run Model'.")
         return
     
+    # CRITICAL: Verify model is in session state (for deployment debugging)
+    verify_model_in_session()
+    
     best_score = modeling_info.get('best_score', 0)
     problem_type = modeling_info.get('problem_type', 'unknown')
 
@@ -673,25 +744,37 @@ def render_modeling_tab():
     st.divider()
     st.markdown("### 📥 Download Model")
     
-    # Add download button for trained model
+    # Retrieve model from session state (CRITICAL: separate storage for deployment reliability)
     try:
-        best_model = modeling_info.get('best_model')
-        best_model_name = modeling_info.get('best_model_name', 'Model')
-        target_col = st.session_state.selected_target or "model"
+        trained_model = st.session_state.get('trained_model_object')
+        model_name = st.session_state.get('trained_model_name', 'Model')
+        target_col = st.session_state.get('trained_model_target') or st.session_state.selected_target or "model"
         
-        if best_model is not None:
-            model_bytes, filename = serialize_model_for_download(best_model, best_model_name, target_col)
-            
-            st.download_button(
-                label="⬇️ Download Trained Model (.pkl)",
-                data=model_bytes,
-                file_name=filename,
-                mime="application/octet-stream",
-                use_container_width=True
-            )
-            st.caption(f"📦 File: {filename} | Format: joblib pickle | Model: {best_model_name}")
+        # Fallback: Try to get from modeling_info if not in separate session state
+        if trained_model is None:
+            trained_model = modeling_info.get('best_model')
+            if trained_model is not None:
+                logger.warning("⚠️ Retrieved model from modeling_info (fallback), should be in session state")
+        
+        if trained_model is not None:
+            try:
+                model_bytes, filename = serialize_model_for_download(trained_model, model_name, target_col)
+                
+                st.download_button(
+                    label="⬇️ Download Trained Model (.pkl)",
+                    data=model_bytes,
+                    file_name=filename,
+                    mime="application/octet-stream",
+                    use_container_width=True
+                )
+                st.caption(f"📦 File: {filename} | Format: joblib pickle | Model: {model_name}")
+                logger.info(f"✅ Download button rendered for: {filename}")
+            except Exception as serialize_error:
+                st.error(f"❌ Error serializing model: {str(serialize_error)}")
+                logger.error(f"Serialization error: {str(serialize_error)}", exc_info=True)
         else:
             st.warning("⚠️ Model object not available for download")
+            logger.warning("⚠️ trained_model_object is None in session state")
     except Exception as e:
         st.error(f"❌ Error preparing model download: {str(e)}")
         logger.error(f"Model download error: {str(e)}", exc_info=True)
